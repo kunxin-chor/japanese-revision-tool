@@ -2,14 +2,14 @@ require("dotenv").config();
 const { connect } = require("./db");
 const { getReviewsByLevelAndType, extractWords, VALID_LEVELS } = require("./bunpro");
 
-async function upsertItems(db, items, masteryLevel, type) {
+async function upsertItems(db, items, masteryLevel, type, userId) {
   const collection = db.collection("reviews");
   let inserted = 0;
   let updated = 0;
 
   for (const item of items) {
-    // Use both bunproId and type to uniquely identify items
-    const filter = { bunproId: item.id, type };
+    // Use bunproId, type, and userId to uniquely identify items
+    const filter = { bunproId: item.id, type, userId };
     const existing = await collection.findOne(filter);
 
     if (existing) {
@@ -25,6 +25,7 @@ async function upsertItems(db, items, masteryLevel, type) {
       await collection.insertOne({
         bunproId: item.id,
         type, // "vocab" or "grammar"
+        userId,
         slug: item.slug,
         title: item.title,
         meaning: item.meaning,
@@ -40,7 +41,7 @@ async function upsertItems(db, items, masteryLevel, type) {
   return { inserted, updated };
 }
 
-async function syncType(db, type) {
+async function syncType(db, type, userId) {
   const typeLabel = type === "Vocab" ? "vocab" : "grammar";
   let totalInserted = 0;
   let totalUpdated = 0;
@@ -52,7 +53,7 @@ async function syncType(db, type) {
 
     console.log(`  Found ${items.length} ${type} items at ${level}`);
 
-    const { inserted, updated } = await upsertItems(db, items, level, typeLabel);
+    const { inserted, updated } = await upsertItems(db, items, level, typeLabel, userId);
     totalInserted += inserted;
     totalUpdated += updated;
 
@@ -62,7 +63,49 @@ async function syncType(db, type) {
   return { totalInserted, totalUpdated };
 }
 
-async function syncAllData() {
+async function saveReadingLesson({ jlptLevel, lines, vocabs, grammar, title }) {
+  const connectionString = process.env.MONGO_URI;
+  if (!connectionString) {
+    throw new Error("Missing MONGO_URI in environment or .env");
+  }
+
+  const dbName = process.env.DB_NAME || "japanese-revision-tool";
+  const db = await connect(connectionString, dbName);
+  const collection = db.collection("lessons");
+
+  const lesson = {
+    type: "reading",
+    jlptLevel,
+    title: title || null,
+    lines,
+    vocabs: vocabs.map(v => ({
+      _id: v._id || null,
+      bunproId: v.bunproId || v.id || null,
+      title: v.title,
+      meaning: v.meaning,
+      hiragana: v.hiragana || null
+    })),
+    grammar: grammar.map(g => ({
+      _id: g._id || null,
+      bunproId: g.bunproId || g.id || null,
+      title: g.title,
+      meaning: g.meaning
+    })),
+    createdAt: new Date(),
+    updatedAt: new Date()
+  };
+
+  const result = await collection.insertOne(lesson);
+  console.log(`Saved reading lesson (jlptLevel: ${jlptLevel}) with _id: ${result.insertedId}`);
+
+  return { ...lesson, _id: result.insertedId };
+}
+
+async function syncAllData(userId) {
+  if (!userId) {
+    throw new Error("userId is required for syncAllData");
+  }
+
   const connectionString = process.env.MONGO_URI;
   if (!connectionString) {
     throw new Error("Missing MONGO_URI in environment or .env");
@@ -71,12 +114,12 @@ async function syncAllData() {
   const dbName = process.env.DB_NAME || "japanese-revision-tool";
   const db = await connect(connectionString, dbName);
 
-  console.log("=== Syncing Vocab ===");
-  const vocabStats = await syncType(db, "Vocab");
+  console.log(`=== Syncing Vocab for user ${userId} ===`);
+  const vocabStats = await syncType(db, "Vocab", userId);
   console.log(`Vocab sync complete. Inserted: ${vocabStats.totalInserted}, Updated: ${vocabStats.totalUpdated}\n`);
 
-  console.log("=== Syncing Grammar ===");
-  const grammarStats = await syncType(db, "Grammar");
+  console.log(`=== Syncing Grammar for user ${userId} ===`);
+  const grammarStats = await syncType(db, "Grammar", userId);
   console.log(`Grammar sync complete. Inserted: ${grammarStats.totalInserted}, Updated: ${grammarStats.totalUpdated}\n`);
 
   console.log("=== All data synced ===");
@@ -86,7 +129,8 @@ async function syncAllData() {
 module.exports = {
   syncAllData,
   syncType,
-  upsertItems
+  upsertItems,
+  saveReadingLesson
 };
 
 // Run directly if called as script
